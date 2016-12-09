@@ -223,7 +223,7 @@ module Impl =
   open Expecto.Logging.Message
   open Helpers
 
-  let logger = Log.create "Fuchu"
+  let logger = Log.create "Expecto"
 
   type TestResult =
     | Passed
@@ -336,10 +336,12 @@ module Impl =
       summary : TestResultCounts -> unit }
 
     static member Default =
-      { beforeRun = fun tests ->
-          logger.info (eventX "EXPECTO? Running tests...")
+      { beforeRun = fun _tests ->
+          logger.info (
+            eventX "EXPECTO? Running tests...")
 
         beforeEach = fun n ->
+
           logger.debug (
             eventX "{testName} starting..."
             >> setField "testName" n)
@@ -553,10 +555,10 @@ module Impl =
 
 [<AutoOpen; Extension>]
 module Tests =
-  open Expecto.Logging
   open Impl
   open Helpers
   open Argu
+  open Expecto.Logging
 
   /// Fail this test
   let inline failtest msg = raise <| AssertException msg
@@ -654,15 +656,16 @@ module Tests =
     { parallel  = true
       filter    = id
       printer   = TestPrinters.Default
-      verbosity = Logging.Info }
+      verbosity = LogLevel.Info }
 
   type CLIArguments =
     | Sequenced
     | Parallel
     | Debug
     | Filter of hiera:string
-    | FilterTestList of substring:string
-    | FilterTestCase of substring:string
+    | Filter_Test_List of substring:string
+    | Filter_Test_Case of substring:string
+    | List_Tests
 
     interface IArgParserTemplate with
       member s.Usage =
@@ -671,8 +674,9 @@ module Tests =
         | Parallel -> "Run all tests in parallel (default)."
         | Debug -> "Extra verbose printing. Useful to combine with --sequenced."
         | Filter _ -> "Filter the list of tests by a hierarchy that's slash (/) separated."
-        | FilterTestList _ -> "Filter the list of test lists by a substring."
-        | FilterTestCase _ -> "Filter the list of test cases by a substring."
+        | Filter_Test_List _ -> "Filter the list of test lists by a substring."
+        | Filter_Test_Case _ -> "Filter the list of test cases by a substring."
+        | List_Tests -> "Doesn't run tests, print out list of tests instead"
 
   [<CompilationRepresentation (CompilationRepresentationFlags.ModuleSuffix)>]
   module ExpectoConfig =
@@ -680,18 +684,37 @@ module Tests =
     /// Parses command-line arguments into a config. This allows you to
     /// override the config from the command line, rather than having
     /// to go into the compiled code to change how they are being run.
+    /// Also checks if tests should be run or only listed
     let fillFromArgs baseConfig =
       let parser = ArgumentParser.Create<CLIArguments>()
       let flip f a b = f b a
+
+      let getTestList (s : string) =
+        let all = s.Split ('/')
+        match all with
+        | [||] -> [||]
+        | [|x|] -> [||]
+        | xs -> xs.[0 .. all.Length - 2]
+
+      let getTastCase (s : string) =
+        let all = s.Split ('/')
+        match all with
+        | [||] -> ""
+        | xs -> xs.Last()
+
+
 
       let reduceKnown : CLIArguments -> (_ -> ExpectoConfig) =
         function
         | Sequenced -> fun o -> { o with ExpectoConfig.parallel = false }
         | Parallel -> fun o -> { o with parallel = true }
-        | Debug -> fun o -> { o with verbosity = Logging.Debug }
-        | Filter _ -> fun o -> failwith "TODO: PRs much appreciated."
-        | FilterTestList _ -> fun o -> failwith "TODO: PRs much appreciated."
-        | FilterTestCase _ -> fun o -> failwith "TODO: PRs much appreciated."
+        | Debug -> fun o -> { o with verbosity = LogLevel.Debug }
+        | Filter hiera -> fun o -> {o with filter = Test.filter (fun s -> s.StartsWith hiera )}
+        | Filter_Test_List name ->  fun o -> {o with filter = Test.filter (fun s -> s |> getTestList |> Array.exists(fun s -> s.Contains name )) }
+        | Filter_Test_Case name ->  fun o -> {o with filter = Test.filter (fun s -> s |> getTastCase |> fun s -> s.Contains name )}
+        | List_Tests -> id
+
+
 
       fun (args: string[]) ->
         let parsed =
@@ -700,8 +723,14 @@ module Tests =
             ignoreMissing = true,
             ignoreUnrecognized = true,
             raiseOnUsage = false)
+        let isList = parsed.Contains <@ List_Tests @>
+        (baseConfig, parsed.GetAllResults()) ||> Seq.fold (flip reduceKnown), isList
 
-        (baseConfig, parsed.GetAllResults()) ||> Seq.fold (flip reduceKnown)
+  /// Prints out names of all tests for given test suite.
+  let listTests test =
+    test
+    |> Test.toTestCodeList
+    |> Seq.iter (fst3 >> printfn "%s")
 
   /// Runs tests with supplied options. Returns 0 if all tests passed, =
   /// otherwise 1
@@ -718,5 +747,6 @@ module Tests =
       match testFromAssembly (Assembly.GetEntryAssembly()) with
       | Some t -> t
       | None -> TestList ([], Normal)
-    let config = args |> ExpectoConfig.fillFromArgs config
-    runTests config tests
+    let config, isList = args |> ExpectoConfig.fillFromArgs config
+    let tests = tests |> config.filter
+    if isList then listTests tests; 0 else runTests config tests
